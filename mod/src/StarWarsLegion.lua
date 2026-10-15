@@ -6,6 +6,7 @@ require('!/generated/cards')
 require('!/UI')
 require('!/RangeRulers')
 require('!/Cohesion')
+require('!/LineOfSight')
 -- Must stay AFTER !/RangeRulers and !/Cohesion: it captures their original
 -- functions before shadowing them.
 require('!/ExtendedOverlays')
@@ -57,6 +58,9 @@ function onload(saveData)
 
     gameDataGUID = "6bb850"
     battlefieldZoneGUID = "cbc575" -- real
+    -- Prepares the battlefield's terrain meshes for line of sight in the
+    -- background (includes/LineOfSight.ttslua).
+    losStartPrefetch()
     conditionsZoneGUID = "c49089" -- conditions
     competitiveTerrainZoneGUID = "92b9be"
 

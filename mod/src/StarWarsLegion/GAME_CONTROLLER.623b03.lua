@@ -726,6 +726,29 @@ function printToScreen(screenText, fontSize, selectedAlignment)
     screen.editButton({
         int = 0, click_function = "dud", function_owner = self, label = screenText, position = {0.9, 0.25, 0}, rotation = {0, -90, 90}, scale = {0.5, 0.5, 0.5}, width = 0, height = 0, font_size = fontSize, font_color = {0.8867, 0.7804, 0, 1}, alignment = selectedAlignment
     })
+    printScreenLines({})
+end
+
+SCREEN_TEXT_COLOR = {0.8867, 0.7804, 0, 1}
+
+-- Extra lines of text on the screen, each its own button (buttons 1 and up),
+-- so layouts can set their own line spacing. lines = list of
+-- {text, y, z, size, color}. On the screen, local +y is up and local +z is
+-- the players' left. Unused buttons are blanked, not removed.
+function printScreenLines(lines)
+    local count = #(screen.getButtons() or {})
+    for i = 1, math.max(#lines, count - 1) do
+        local line = lines[i] or {text = "", y = 0, z = 0}
+        local params = {
+            click_function = "dud", function_owner = self, label = line.text, position = {0.9, line.y, line.z}, rotation = {0, -90, 90}, scale = {0.5, 0.5, 0.5}, width = 0, height = 0, font_size = line.size or 50, font_color = line.color or SCREEN_TEXT_COLOR
+        }
+        if i < count then
+            params.index = i
+            screen.editButton(params)
+        else
+            screen.createButton(params)
+        end
+    end
 end
 
 function createOptionButton(optionNumber, optionClickFunction, optionLabel, optionToolTip,tint)
@@ -1792,7 +1815,6 @@ MISSION_ACTION_TOOLTIPS = {
 missionCards = {}
 
 -- Blank lines after the TV text push it up, clear of the card row.
-MISSION_TEXT_PADDING = string.rep("\n", 19)
 
 local function missionSeatName(seat)
   return seat .. " Player"
@@ -1889,12 +1911,13 @@ function clearMissionCards()
 end
 
 -- The mission's cards sit in one row along the bottom of the TV, left to
--- right: Objective, Secondary, blue's Advantage, red's Advantage. Offsets are
+-- right: Objective, Secondary, the blue seat's Advantage, the red seat's
+-- Advantage (by seat, not role, so each sits on its owner's side). Offsets are
 -- subtracted from the screen's position (as gameController.setUpCardsPos):
 -- x and y place the row on the tilted screen, z spaces the cards.
 MISSION_CARD_SCALE = 0.95
 MISSION_CARD_ROW = {1.68, -1.21}
-MISSION_CARD_COLUMNS = {-3.77, -1.17, 1.43, 4.03}
+MISSION_CARD_COLUMNS = {-3.75, -1.25, 1.25, 3.75}
 
 -- Shows a card on the TV in column 1..4.
 local function showMissionCard(slotKey, column, kind, card)
@@ -1920,12 +1943,10 @@ local function showMissionCard(slotKey, column, kind, card)
 end
 
 local function showMission()
-  local blue = mission.blueSeat
-  local red = Mission.otherSeat(blue)
   showMissionCard("objective", 1, "objective", mission.cards.objective)
   showMissionCard("secondary", 2, "secondary", mission.cards.secondary)
-  showMissionCard("advantageBlue", 3, "advantage", mission.cards.advantage[blue])
-  showMissionCard("advantageRed", 4, "advantage", mission.cards.advantage[red])
+  showMissionCard("advantageBlue", 3, "advantage", mission.cards.advantage.Blue)
+  showMissionCard("advantageRed", 4, "advantage", mission.cards.advantage.Red)
 end
 
 local function missionSummary()
@@ -1938,6 +1959,38 @@ local function missionSummary()
     .. "\nSecondary: " .. name(mission.cards.secondary)
     .. "\nBlue Advantage (" .. blue .. " seat): " .. name(mission.cards.advantage[blue])
     .. "\nRed Advantage (" .. red .. " seat): " .. name(mission.cards.advantage[red])
+end
+
+-- Layout in screen-local units (see printScreenLines).
+MISSION_HEADER_Y = {0.84, 0.72, 0.62}
+MISSION_BLUE_PLAYER_Y = 0.52
+MISSION_LABEL_Y = 0.40
+
+-- Shows the header lines (list of {text, color, size}) at the top of the TV,
+-- which seat is the blue player, and a label over each mission card.
+local function showMissionScreen(header)
+  local lines = {}
+  local function add(text, y, z, size, color)
+    table.insert(lines, {text = text, y = y, z = z, size = size, color = color})
+  end
+  for i, line in ipairs(header) do
+    add(line.text, MISSION_HEADER_Y[i], 0, line.size, line.color)
+  end
+  add(mission.blueSeat:upper() .. " SEAT IS THE BLUE PLAYER", MISSION_BLUE_PLAYER_Y, 0, 55, MISSION_SEAT_COLORS[mission.blueSeat])
+  local labels = {
+    {text = "OBJECTIVE"},
+    {text = "SECONDARY"},
+    {text = "BLUE SEAT", color = MISSION_SEAT_COLORS.Blue},
+    {text = "RED SEAT", color = MISSION_SEAT_COLORS.Red},
+  }
+  local scaleZ = screen.getScale().z
+  for column, label in ipairs(labels) do
+    -- Cards are placed at screen.z - offset; local z runs along world z.
+    local z = -MISSION_CARD_COLUMNS[column] / scaleZ
+    add(label.text, MISSION_LABEL_Y, z, 50, label.color)
+  end
+  printToScreen("", 50, 3)
+  printScreenLines(lines)
 end
 
 -- Step 1: read both decks.
@@ -1963,6 +2016,51 @@ function buildMissionMenu()
   printToScreen("BUILD MISSION (" .. modeName .. ")\n\nWho is the blue player?\n\nRoll off as the rules describe, then pick the winner below.", 70, 3)
 end
 
+-- Shows the Objectives and Secondaries in both players' battle decks side by
+-- side (blue seat on the left, red seat on the right), so blue can compare
+-- what each reveal choice could draw.
+MISSION_SEAT_COLORS = {
+  Blue = {0.45, 0.7, 1, 1},
+  Red  = {1, 0.45, 0.45, 1},
+}
+
+-- Layout in screen-local units (see printScreenLines).
+MISSION_DECKS_TITLE_Y = 0.84
+MISSION_DECKS_TOP_Y = 0.66
+MISSION_DECKS_LINE = 0.09
+MISSION_DECKS_COLUMN_Z = 0.42
+
+local function showMissionDecks(blueSeat)
+  local lines = {}
+  local function add(text, y, z, size, color)
+    table.insert(lines, {text = text, y = y, z = z, size = size, color = color})
+  end
+  add("BUILD MISSION", MISSION_DECKS_TITLE_Y, 0, 75)
+  for _, seat in ipairs({"Blue", "Red"}) do
+    local z = seat == "Blue" and MISSION_DECKS_COLUMN_Z or -MISSION_DECKS_COLUMN_Z
+    local color = MISSION_SEAT_COLORS[seat]
+    local role = seat == blueSeat and "blue" or "red"
+    local y = MISSION_DECKS_TOP_Y
+    add(seat:upper() .. " SEAT", y, z, 70, color)
+    y = y - MISSION_DECKS_LINE
+    add("(" .. role .. " player)", y, z, 55, color)
+    for _, row in ipairs({{"objective", "OBJECTIVES"}, {"secondary", "SECONDARIES"}}) do
+      y = y - MISSION_DECKS_LINE * 1.5
+      add(row[2], y, z, 60)
+      local names = missionDecks[seat][row[1]]
+      if #names == 0 then
+        names = {"-"}
+      end
+      for _, name in ipairs(names) do
+        y = y - MISSION_DECKS_LINE
+        add(name, y, z, 65, color)
+      end
+    end
+  end
+  printToScreen("", 50, 3)
+  printScreenLines(lines)
+end
+
 local function startMission(blueSeat)
   mission = Mission:create({
     red      = missionDecks.Red,
@@ -1975,7 +2073,7 @@ local function startMission(blueSeat)
     {functionName = "missionRevealObjective", label = "Reveal Objective", tooltip = "Blue reveals an Objective; Red reveals a Secondary", buttonTint = {0, 0.913, 1}},
     {functionName = "missionRevealSecondary", label = "Reveal Secondary", tooltip = "Blue reveals a Secondary; Red reveals an Objective", buttonTint = {0, 0.913, 1}},
   }, 1)
-  printToScreen("BUILD MISSION\n\n" .. missionSeatName(blueSeat) .. " (blue):\nreveal an Objective or a Secondary?\n\nThe red player reveals the other.\nBoth players reveal an Advantage.", 70, 3)
+  showMissionDecks(blueSeat)
 end
 
 function missionBlueIsBlue()
@@ -2007,7 +2105,6 @@ function missionTurnMenu()
     return
   end
   local seat = mission:currentSeat()
-  local role = mission.blueSeat == seat and "blue" or "red"
   local turn = MISSION_TURNS - mission:turnsLeft() + 1
   local entries = {}
   for _, action in ipairs(mission:availableActions(seat)) do
@@ -2032,7 +2129,10 @@ function missionTurnMenu()
   clearAllButtons()
   changeBackButton("reset", "Cancel and go back to Main Menu")
   createMenu(entries, 1)
-  printToScreen("MODIFY THE MISSION (turn " .. turn .. " of " .. MISSION_TURNS .. ")\n" .. missionSeatName(seat) .. " (" .. role .. ")\n\n" .. missionSummary() .. MISSION_TEXT_PADDING, 50, 2)
+  showMissionScreen({
+    {text = "MODIFY THE MISSION (turn " .. turn .. " of " .. MISSION_TURNS .. ")", size = 75},
+    {text = seat:upper() .. " SEAT'S TURN", size = 65, color = MISSION_SEAT_COLORS[seat]},
+  })
 end
 
 -- Step 3: blue picks a long edge. Players never change seats: picking the
@@ -2047,7 +2147,11 @@ function missionSideMenu()
     {functionName = "missionEdgeNear", label = "Edge at My Seat", tooltip = "Keep the battlefield as it is: blue deploys on the edge in front of them", buttonTint = tint},
     {functionName = "missionEdgeFar", label = "Far Edge (Flip Map)", tooltip = "Turn the battlefield around so the far edge's terrain is in front of the blue player", buttonTint = tint},
   }, 1)
-  printToScreen("MISSION BUILT\n" .. missionSeatName(mission.blueSeat) .. " (blue): choose your table edge.\nPlayers keep their seats: the far edge flips the map.\n" .. missionSummary() .. MISSION_TEXT_PADDING, 50, 2)
+  showMissionScreen({
+    {text = "MISSION BUILT", size = 75},
+    {text = "Blue player: choose your table edge", size = 60, color = MISSION_SEAT_COLORS[mission.blueSeat]},
+    {text = "Players keep their seats: the far edge flips the map", size = 50},
+  })
 end
 
 function missionEdgeNear()

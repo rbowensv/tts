@@ -3,3 +3,4 @@ mod/src/includes/generated/
 node_modules/
 .vs/
 .los-scene/
+.tts

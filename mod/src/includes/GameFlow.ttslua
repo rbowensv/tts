@@ -1,0 +1,213 @@
+-- The game walk-through on the game controller's screen: after the mission
+-- is set up, it shows each step of Setup and of the five rounds (see !/Game)
+-- with its rules text, and the buttons to move on. PREV undoes a step, BACK
+-- goes to the main menu (Resume Game comes back), and the game is saved with
+-- the controller, so a reloaded save carries on at the same step.
+--
+-- Included by the game controller: it uses the controller's menu and screen
+-- functions (createMenu, printToScreen, change*Button, clearAllButtons).
+--
+-- Whatever the walk-through does on the table must fail quietly: a piece
+-- that isn't where it's expected was most likely moved by the players on
+-- purpose, and the game goes on without it.
+
+game = nil
+
+local GAME_TINT = {0, 0.913, 1}
+local GAME_SEAT_TINTS = {Blue = {0, 0.4, 1}, Red = {1, 0.2, 0.2}}
+local GAME_CHAT_COLOR = {0.8, 0.9, 1}
+-- A click this soon after the buttons are redrawn was aimed at the old ones.
+local GAME_REDRAW_GUARD = 0.5
+
+local function gameClickAllowed(playerColor)
+  if playerColor == nil or playerColor == "Grey" then return false end
+  return os.clock() - (gameDrawnAt or 0) >= GAME_REDRAW_GUARD
+end
+
+local function roleName(role)
+  return role .. " player"
+end
+
+-- "Blue seat (red player)" style, for when seat and role differ.
+local function seatName(seat)
+  local role = game:roleOf(seat)
+  if role == seat then return roleName(role) end
+  return seat .. " seat (" .. role:lower() .. " player)"
+end
+
+local function phaseHeader()
+  if game.phase == "setup" or game:isOver() then
+    return GAME_PHASE_TITLES[game.phase]
+  end
+  return "ROUND " .. game.round .. " OF " .. GAME_ROUNDS .. " - " .. GAME_PHASE_TITLES[game.phase]
+end
+
+local function readyStatus()
+  local lines = {}
+  for _, seat in ipairs({"Blue", "Red"}) do
+    local state = "waiting"
+    if game.ready[seat] then
+      state = game.noCard[seat] and "no card" or "READY"
+    end
+    table.insert(lines, seatName(seat) .. ": " .. state)
+  end
+  return table.concat(lines, "\n")
+end
+
+local function finalScore()
+  local blue, red = Scoreboard.vp("Blue"), Scoreboard.vp("Red")
+  if blue == nil or red == nil then
+    return "Final scores: see the scoreboard."
+  end
+  local winner = Game.winner(blue, red)
+  local result = winner and (roleName(winner):upper() .. " WINS") or "TIED ON VP: compare army kill points"
+  return "Blue player " .. blue .. " VP, red player " .. red .. " VP\n\n" .. result
+end
+
+local function showScreen()
+  local body
+  if game:isOver() then
+    body = finalScore()
+  else
+    local step = game:currentStep()
+    body = step.title:upper() .. "\n\n" .. game:text(step)
+    if step.wait == "ready" then
+      body = body .. "\n\n" .. readyStatus()
+    end
+  end
+  printToScreen(phaseHeader() .. "\n\n" .. body, 50, 3)
+end
+
+-- What changed beyond the step (see Game:next), on the table and in chat.
+local function applyChange(changed, oldPhase)
+  if changed.round then
+    Scoreboard.setRound(changed.round)
+  end
+  if changed.over then
+    broadcastToAll("Game over. " .. finalScore():gsub("\n+", ". "), GAME_CHAT_COLOR)
+  elseif game.phase ~= oldPhase then
+    local where = game.phase == "setup" and "" or ("Round " .. game.round .. ": ")
+    printToAll(where .. GAME_PHASE_TITLES[game.phase]:lower():gsub("^%l", string.upper) .. ".", GAME_CHAT_COLOR)
+  end
+end
+
+function showGame()
+  if game == nil then
+    mainMenu()
+    return
+  end
+  missionMenuOpen = false
+  missionActingSeat = nil
+  gameDrawnAt = os.clock()
+  clearAllButtons()
+  changeBackButton("mainMenu", "Main Menu: the game carries on, Resume Game comes back")
+
+  local entries = {}
+  if game:isOver() then
+    table.insert(entries, {functionName = "gameClose", label = "Close Game", tooltip = "Back to the Main Menu", buttonTint = GAME_TINT})
+  else
+    local step = game:currentStep()
+    if step.wait == "ready" then
+      for _, seat in ipairs({"Blue", "Red"}) do
+        if not game.ready[seat] then
+          table.insert(entries, {functionName = "gameReady" .. seat, label = seat .. " Seat: Ready", tooltip = "Your command card is flipped face down in your hand", buttonTint = GAME_SEAT_TINTS[seat]})
+          table.insert(entries, {functionName = "gameNoCard" .. seat, label = seat .. " Seat: No Card", tooltip = "You can't play a command card this round", buttonTint = GAME_SEAT_TINTS[seat]})
+        end
+      end
+    elseif step.choice == "priority" then
+      for _, role in ipairs({"Blue", "Red"}) do
+        table.insert(entries, {functionName = "gamePriority" .. role, label = roleName(role) .. " Has Priority", tooltip = "The " .. roleName(role) .. " (" .. game:seatOf(role) .. " seat) has priority this round", buttonTint = GAME_SEAT_TINTS[game:seatOf(role)]})
+      end
+    else
+      table.insert(entries, {functionName = "gameNext", label = step.next or "Next Step", tooltip = "Go on to the next step", buttonTint = GAME_TINT})
+    end
+  end
+  createMenu(entries, 1)
+  -- After createMenu, which clears it.
+  if game:canGoBack() then
+    changePrevButton("gameBack", "Undo the last step")
+  end
+  showScreen()
+end
+
+function startGame(blueSeat)
+  game = Game:create({blueSeat = blueSeat})
+  printToAll("Setup.", GAME_CHAT_COLOR)
+  showGame()
+end
+
+function gameNext(_, playerColor)
+  if game == nil or not gameClickAllowed(playerColor) then return end
+  local oldPhase = game.phase
+  applyChange(game:next(), oldPhase)
+  showGame()
+end
+
+function gameBack()
+  if game == nil or os.clock() - (gameDrawnAt or 0) < GAME_REDRAW_GUARD then return end
+  local changed = game:back()
+  if changed.round then
+    Scoreboard.setRound(changed.round)
+  end
+  showGame()
+end
+
+local function seatReady(seat, noCard, playerColor)
+  if game == nil or not gameClickAllowed(playerColor) then return end
+  if Player[seat].seated and playerColor ~= seat then
+    pcall(broadcastToColor, "Only the " .. seat .. " seat can click that.", playerColor, {1, 0.8, 0.4})
+    return
+  end
+  local oldPhase = game.phase
+  if game:setReady(seat, noCard) then
+    broadcastToAll("Both players are ready: reveal your command cards.", GAME_CHAT_COLOR)
+    applyChange({}, oldPhase)
+  end
+  showGame()
+end
+
+function gameReadyBlue(_, playerColor) seatReady("Blue", false, playerColor) end
+function gameReadyRed(_, playerColor) seatReady("Red", false, playerColor) end
+function gameNoCardBlue(_, playerColor) seatReady("Blue", true, playerColor) end
+function gameNoCardRed(_, playerColor) seatReady("Red", true, playerColor) end
+
+local function choosePriority(role, playerColor)
+  if game == nil or not gameClickAllowed(playerColor) then return end
+  local step = game:currentStep()
+  if step == nil or step.choice ~= "priority" then return end
+  game:setPriority(role)
+  printToAll("Round " .. game.round .. ": the " .. roleName(role) .. " has priority.", GAME_CHAT_COLOR)
+  showGame()
+end
+
+function gamePriorityBlue(_, playerColor) choosePriority("Blue", playerColor) end
+function gamePriorityRed(_, playerColor) choosePriority("Red", playerColor) end
+
+function gameClose(_, playerColor)
+  if not gameClickAllowed(playerColor) then return end
+  game = nil
+  mainMenu()
+end
+
+-- Starting a game without the mission builder: who is the blue player?
+function gameStartMenu()
+  clearAllButtons()
+  changeBackButton("mainMenu", "Go back to Main Menu")
+  createMenu({
+    {functionName = "gameStartBlueIsBlue", label = "Blue Seat: Blue Player", tooltip = "The player at the blue seat is the blue player", buttonTint = GAME_SEAT_TINTS.Blue},
+    {functionName = "gameStartRedIsBlue", label = "Red Seat: Blue Player", tooltip = "The player at the red seat is the blue player", buttonTint = GAME_SEAT_TINTS.Red},
+  }, 1)
+  printToScreen("START GAME\n\nWho is the blue player?", 60, 3)
+end
+
+function gameStartBlueIsBlue() startGame("Blue") end
+function gameStartRedIsBlue() startGame("Red") end
+
+-- For the controller's onSave and onload.
+function gameSaveState()
+  return game and game:save() or nil
+end
+
+function gameLoadState(data)
+  game = Game:load(data)
+end

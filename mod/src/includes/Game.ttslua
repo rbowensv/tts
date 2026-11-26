@@ -1,0 +1,284 @@
+-- The game's progress, from Setup through the five rounds, each round a
+-- Command, an Activation and an End Phase. The game controller shows the
+-- current step on its screen and moves through them (see !/GameFlow).
+--
+-- This is pure logic with no TTS calls, so it can be tested outside of TTS
+-- (see tool/test/Game.test.lua). Seats are "Red" and "Blue" (the player
+-- colors); roles are "Blue" and "Red" (the blue and red players), and
+-- blueSeat says which seat holds the blue player.
+--
+-- The steps are data (GAME_STEPS): each has an id, a title and the rules text
+-- to show, and optionally:
+--   wait   = "ready": both seats click Ready (or No Card) to go on.
+--   choice = "priority": a player picks who has priority to go on.
+--   next   = the label of the button that goes on (default "Next Step").
+-- In a step's text, {priority} is the player with priority this round, and
+-- {round} the round.
+
+Game = {}
+Game.__index = Game
+
+GAME_ROUNDS = 5
+GAME_PHASES = {"setup", "command", "activation", "end"}
+GAME_PHASE_TITLES = {
+  setup      = "SETUP",
+  command    = "COMMAND PHASE",
+  activation = "ACTIVATION PHASE",
+  ["end"]    = "END PHASE",
+  over       = "GAME OVER",
+}
+
+GAME_STEPS = {
+  setup = {
+    {id = "setupAbilities", title = "Setup Abilities",
+     text = "Starting with the blue player, resolve the abilities\n"
+       .. "and effects that happen during Setup:\n"
+       .. "Bounty, Cache, Complete the Mission, Field Commander,\n"
+       .. "Hunted, Scouting Party X, Transport."},
+    {id = "preparedPositions", title = "Deploy in Prepared Positions",
+     text = "Starting with the blue player, take turns placing\n"
+       .. "units with Prepared Position on the battlefield.\n"
+       .. "Every other unit deploys in its first activation.",
+     next = "Start Round 1"},
+  },
+  command = {
+    {id = "selectCard", title = "Select Command Cards", wait = "ready",
+     text = "Flip the command card you will play face down\n"
+       .. "in your hand, then click Ready.\n"
+       .. "No undefeated Trooper or Field Commander unit?\n"
+       .. "Then you can't play one: click No Card."},
+    {id = "resolveCards", title = "Reveal and Resolve",
+     text = "Reveal the command cards and resolve their effects.\n"
+       .. "Effects at the same time: the blue player's first."},
+    {id = "priority", title = "Determine Priority", choice = "priority",
+     text = "The card with fewer pips chooses who has priority.\n"
+       .. "Same pips: one player rolls a red defense die.\n"
+       .. "On a block they choose, otherwise the other player.\n"
+       .. "Only one card played: that player has priority."},
+    {id = "nominate", title = "Nominate Commanders",
+     text = "Nominate the unit the card names, if it names any.\n"
+       .. "Otherwise a Commander, then an Operative or\n"
+       .. "Field Commander, then a Trooper."},
+    {id = "issueOrders", title = "Issue Orders",
+     text = "Starting with the {priority}, issue the orders\n"
+       .. "on your command card: one per unit, of any type\n"
+       .. "the card names. Orders you can't give are lost."},
+    {id = "orderPool", title = "Create the Order Pool",
+     text = "Put an order token for each undefeated unit without\n"
+       .. "an order in your command stack, and shuffle it."},
+    {id = "passPool", title = "Create the Pass Pool",
+     text = "The player with fewer undefeated units takes\n"
+       .. "Advantage tokens equal to the difference."},
+  },
+  activation = {
+    {id = "activate", title = "Activate Units", next = "End Activation Phase",
+     text = "Starting with the {priority}, take turns\n"
+       .. "activating units. A unit not yet on the battlefield\n"
+       .. "deploys as part of its first activation."},
+  },
+  ["end"] = {
+    {id = "startEffects", title = "Start of the End Phase",
+     text = "Resolve abilities and effects that happen\n"
+       .. "at the start of the End Phase."},
+    {id = "scoreObjective", title = "Score the Objective",
+     text = "Score VPs as described on the Objective card,\n"
+       .. "on the scoreboard's VP track."},
+    {id = "scoreSecondary", title = "Score the Secondary Objective",
+     text = "Score VPs as described on the Secondary Objective\n"
+       .. "card, on the scoreboard's VP track."},
+    {id = "discardCards", title = "Discard Command Cards",
+     text = "Discard your revealed command card.\n"
+       .. "It can't be played again this game."},
+    {id = "removeTokens", title = "Remove Tokens",
+     text = "Remove all Aim, Dodge, Observation, Surge and Standby\n"
+       .. "tokens, then 1 Suppression token from each unit,\n"
+       .. "then the Advantage tokens in your pass pool."},
+    {id = "updateOrderPool", title = "Update the Order Pool",
+     text = "Return your order tokens to your command tray."},
+    {id = "endEffects", title = "End of the End Phase",
+     text = "Resolve abilities and effects that happen\n"
+       .. "at the end of the End Phase."},
+    {id = "advanceRound", title = "Advance the Round Counter",
+     text = "Round {round} is over."},
+  },
+}
+
+-- Most steps Back can undo.
+local HISTORY_LIMIT = 100
+
+local function otherSeat(seat)
+  return seat == "Red" and "Blue" or "Red"
+end
+
+-- params.blueSeat = "Red" or "Blue" (who is the blue player)
+function Game:create(params)
+  return setmetatable({
+    blueSeat = params.blueSeat or "Blue",
+    round    = 1,
+    phase    = "setup",
+    step     = 1,
+    priority = nil,
+    ready    = {},
+    noCard   = {},
+    history  = {},
+  }, Game)
+end
+
+-- A game from save(); nil if `data` isn't one.
+function Game:load(data)
+  if type(data) ~= "table" or data.phase == nil then return nil end
+  local game = Game:create({blueSeat = data.blueSeat})
+  game.round    = tonumber(data.round) or 1
+  game.phase    = data.phase
+  game.step     = tonumber(data.step) or 1
+  game.priority = data.priority
+  game.ready    = type(data.ready) == "table" and data.ready or {}
+  game.noCard   = type(data.noCard) == "table" and data.noCard or {}
+  game.history  = type(data.history) == "table" and data.history or {}
+  -- A save from a version with other steps: start the phase over.
+  if game.phase ~= "over" and (GAME_STEPS[game.phase] == nil or GAME_STEPS[game.phase][game.step] == nil) then
+    game.phase = GAME_STEPS[game.phase] and game.phase or "command"
+    game.step = 1
+  end
+  return game
+end
+
+-- Everything needed to carry on, as a plain table (for JSON).
+function Game:save()
+  return {
+    blueSeat = self.blueSeat,
+    round    = self.round,
+    phase    = self.phase,
+    step     = self.step,
+    priority = self.priority,
+    ready    = self.ready,
+    noCard   = self.noCard,
+    history  = self.history,
+  }
+end
+
+function Game.otherSeat(seat)
+  return otherSeat(seat)
+end
+
+function Game:seatOf(role)
+  return role == "Blue" and self.blueSeat or otherSeat(self.blueSeat)
+end
+
+function Game:roleOf(seat)
+  return seat == self.blueSeat and "Blue" or "Red"
+end
+
+function Game:isOver()
+  return self.phase == "over"
+end
+
+-- The current step's definition, or nil once the game is over.
+function Game:currentStep()
+  local steps = GAME_STEPS[self.phase]
+  return steps and steps[self.step]
+end
+
+-- The step's text, with {priority} and {round} filled in.
+function Game:text(step)
+  step = step or self:currentStep()
+  if step == nil then return "" end
+  local priority = self.priority and (self.priority:lower() .. " player") or "player with priority"
+  return (step.text:gsub("{priority}", priority):gsub("{round}", tostring(self.round)))
+end
+
+local function snapshot(self)
+  return {round = self.round, phase = self.phase, step = self.step, priority = self.priority,
+          ready = self.ready, noCard = self.noCard}
+end
+
+-- Moves to the next step. Returns what changed beyond the step:
+-- {round = n} when a new round starts, {over = true} when the game ends, or
+-- an empty table.
+function Game:next()
+  if self:isOver() then return {} end
+  table.insert(self.history, snapshot(self))
+  while #self.history > HISTORY_LIMIT do
+    table.remove(self.history, 1)
+  end
+  if self.step < #GAME_STEPS[self.phase] then
+    self.step = self.step + 1
+    return {}
+  end
+  if self.phase == "setup" then
+    return self:_startPhase("command")
+  elseif self.phase == "command" then
+    return self:_startPhase("activation")
+  elseif self.phase == "activation" then
+    return self:_startPhase("end")
+  end
+  -- The End Phase is over: the round counter advances.
+  if self.round >= GAME_ROUNDS then
+    self.phase, self.step = "over", 1
+    return {over = true}
+  end
+  self.round = self.round + 1
+  self.priority = nil
+  local changed = self:_startPhase("command")
+  changed.round = self.round
+  return changed
+end
+
+function Game:_startPhase(phase)
+  self.phase, self.step = phase, 1
+  if phase == "command" then
+    self.ready, self.noCard = {}, {}
+  end
+  return {}
+end
+
+function Game:canGoBack()
+  return #self.history > 0
+end
+
+-- Undoes the last step. Returns {round = n} when that changes the round, or
+-- an empty table (also when there is nothing to undo).
+function Game:back()
+  local last = table.remove(self.history)
+  if last == nil then return {} end
+  local oldRound = self.round
+  self.round, self.phase, self.step = last.round, last.phase, last.step
+  self.priority, self.ready, self.noCard = last.priority, last.ready or {}, last.noCard or {}
+  -- Back to choosing cards: both choose again.
+  local step = self:currentStep()
+  if step and step.wait == "ready" then
+    self.ready, self.noCard = {}, {}
+  end
+  if self.round ~= oldRound then
+    return {round = self.round}
+  end
+  return {}
+end
+
+-- A seat is ready to reveal (noCard: it can't play a command card). Returns
+-- true when both seats are, and the step moves on.
+function Game:setReady(seat, noCard)
+  local step = self:currentStep()
+  if step == nil or step.wait ~= "ready" then return false end
+  self.ready[seat] = true
+  self.noCard[seat] = noCard and true or nil
+  if self.ready.Red and self.ready.Blue then
+    self:next()
+    return true
+  end
+  return false
+end
+
+-- Records who has priority this round (a role) and moves on.
+function Game:setPriority(role)
+  local step = self:currentStep()
+  if step == nil or step.choice ~= "priority" then return end
+  self.priority = role
+  self:next()
+end
+
+-- The winner from the final scores: "Blue", "Red", or nil for a tie.
+function Game.winner(blueVp, redVp)
+  if blueVp == redVp then return nil end
+  return blueVp > redVp and "Blue" or "Red"
+end

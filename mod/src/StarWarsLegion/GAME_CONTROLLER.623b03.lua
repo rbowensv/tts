@@ -2,6 +2,8 @@ require('!/Analytics')
 require('!/Deck')
 require('!/Mission')
 require('!/Scoreboard')
+require('!/Game')
+require('!/GameFlow')
 require('!/common/Zonex')
 
 function onload(save_state)
@@ -68,6 +70,17 @@ function onload(save_state)
 
     homeScreen()
     mainMenu()
+
+    -- A game in progress carries on where it was.
+    local saved = safeJsonDecode(save_state or "")
+    if type(saved) == "table" and saved.game then
+        gameLoadState(saved.game)
+        showGame()
+    end
+end
+
+function onSave()
+    return JSON.encode({game = gameSaveState()})
 end
 
 function homeScreen()
@@ -87,6 +100,11 @@ function mainMenu()
     menuEntries[1] = {functionName = "mapMenu", label = "Maps", tooltip = "Map Menu", buttonTint = {0,0.913,1}}
     menuEntries[2] = {functionName = "gameOptionsMenu", label = "Set Up", tooltip = "Set Up options menu", buttonTint = {0,0.913,1}}
     menuEntries[3] = {functionName = "configMenu", label = "Config", tooltip = "Config Menu", buttonTint = {0,0.913,1}}
+    if game ~= nil then
+        menuEntries[4] = {functionName = "showGame", label = "Resume Game", tooltip = "Back to the game's current step", buttonTint = {0,0.913,1}}
+    else
+        menuEntries[4] = {functionName = "gameStartMenu", label = "Start Game", tooltip = "Walk through Setup and the five rounds (set up the mission first)", buttonTint = {0,0.913,1}}
+    end
 
     createMenu(menuEntries, 1)
 
@@ -807,7 +825,7 @@ function createOptionButton(optionNumber, optionClickFunction, optionLabel, opti
     _G["gameControllerOptionFunction"..optionNumber] = function(_, playerColor)
         if not missionClickAllowed(playerColor) then return end
         optionButtons["gameControllerOption"..optionNumber.."Button"].AssetBundle.playTriggerEffect(0)
-        _G[optionClickFunction](optionNumber)
+        _G[optionClickFunction](optionNumber, playerColor)
     end
     local stringLength = string.len(optionLabel)
 
@@ -2362,5 +2380,6 @@ function setUpMission(flipBattlefield)
   mission = nil
   missionMenuOpen = false
   missionActingSeat = nil
-  mainMenu()
+  -- On to the game: Setup, then the five rounds.
+  startGame(result.blueSeat)
 end

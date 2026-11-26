@@ -361,6 +361,26 @@ function scoreboardClick(obj, playerColor, altClick)
   end
 end
 
+-- Moves the round marker to `round` (1 to 5). Does nothing if the board or
+-- the marker isn't on the table.
+function Scoreboard.setRound(round)
+  if board() == nil then return end
+  for _, obj in ipairs(getObjectsWithTag(SCOREBOARD_TAG)) do
+    local state = readState(obj)
+    if state and state.kind == "round" then
+      local new = {kind = "round", round = clamp(round, 1, #ROUND_U)}
+      if new.round ~= state.round then moveToken(obj, new) end
+      return
+    end
+  end
+end
+
+-- `role`'s VP on the scoreboard, or nil if they have no VP marker on it.
+function Scoreboard.vp(role)
+  local _, state = activeMarker(role)
+  return state and state.vp
+end
+
 -- Puts the buttons back on the tokens of a loaded game (buttons aren't saved).
 function Scoreboard.restore()
   for _, obj in ipairs(getObjectsWithTag(SCOREBOARD_TAG)) do

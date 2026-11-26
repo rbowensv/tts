@@ -1,0 +1,164 @@
+-- What the game walk-through (!/GameFlow) does on the table: reads the
+-- command card flipped face down in a hand, reveals it, stacks the order
+-- tokens, counts them, and deals and returns the pass pool.
+--
+-- Everything here fails quietly. A card or token that isn't where it's
+-- expected was most likely moved by the players on purpose (a card's rules
+-- did something, or they did the step by hand), so it's left alone and the
+-- game goes on.
+
+GameTable = {}
+
+-- Where the walk-through puts things, per seat: x and z on the table. The
+-- Blue seat sits on the +z side. Cards face their own seat (rotY).
+GAME_TABLE_SPOTS = {
+  Blue = {played = {-34.5, 31}, discard = {-38.5, 31}, passPool = {-43.5, 31}, rotY = 0, away = 1},
+  Red  = {played = {-34.5, -31}, discard = {-38.5, -31}, passPool = {-43.5, -31}, rotY = 180, away = -1},
+}
+
+local COMMAND_TRAYS = {Blue = "ac8fe2", Red = "552739"}
+local COMMAND_STACKS = {Blue = "c9f9d0", Red = "e2202d"}
+local ADVANTAGE_BAG = "4d25eb"
+local DROP_HEIGHT = 1.6
+
+local function spot(seat, which, dx, dz)
+  local s = GAME_TABLE_SPOTS[seat]
+  return {s[which][1] + (dx or 0), DROP_HEIGHT, s[which][2] + (dz or 0)}
+end
+
+-- Command card name (lower case) -> pips, from the card data in Global.
+local pips = nil
+
+function GameTable.pipOf(name)
+  if type(name) ~= "string" then return nil end
+  if pips == nil then
+    local ok, schema = pcall(function() return Global.getTable("CardsSchema") end)
+    if not ok or type(schema) ~= "table" then return nil end
+    pips = {}
+    for _, card in pairs(schema.commands or {}) do
+      if card.name then pips[card.name:lower()] = card.pip end
+    end
+    for _, faction in pairs(schema.units or {}) do
+      for _, unit in pairs(faction) do
+        for _, card in ipairs(unit.commands or {}) do
+          if card.name then pips[card.name:lower()] = card.pip end
+        end
+      end
+    end
+  end
+  return pips[name:lower()]
+end
+
+-- The cards face down in the seat's hand (normally the one to play).
+function GameTable.faceDownCards(seat)
+  local ok, objects = pcall(function() return Player[seat].getHandObjects(1) end)
+  local cards = {}
+  if ok and type(objects) == "table" then
+    for _, obj in ipairs(objects) do
+      if obj.type == "Card" and obj.is_face_down then
+        table.insert(cards, obj)
+      end
+    end
+  end
+  return cards
+end
+
+-- {guid, name, pip} for the game's record of a played card.
+function GameTable.describe(card)
+  local name = card.getName()
+  return {guid = card.guid, name = name, pip = GameTable.pipOf(name)}
+end
+
+local function isInHand(seat, guid)
+  local ok, objects = pcall(function() return Player[seat].getHandObjects(1) end)
+  if not ok or type(objects) ~= "table" then return false end
+  for _, obj in ipairs(objects) do
+    if obj.guid == guid then return true end
+  end
+  return false
+end
+
+-- Moves the seat's played card face up to its played spot. False when the
+-- card can't be found.
+--
+-- A card in a hand ignores a smooth move (the hand keeps it) but not a flip,
+-- so it's taken out with an instant move first, then turned face up.
+function GameTable.reveal(seat, played)
+  local card = played and played.guid and getObjectFromGUID(played.guid)
+  if card == nil then return false end
+  card.setPosition(spot(seat, "played"))
+  Wait.frames(function()
+    if card ~= nil then card.setRotation({0, GAME_TABLE_SPOTS[seat].rotY, 0}) end
+  end, 1)
+  return true
+end
+
+-- Puts a revealed card back face down in the seat's hand (undoing reveal).
+function GameTable.returnToHand(seat, played)
+  local card = played and played.guid and getObjectFromGUID(played.guid)
+  if card == nil or isInHand(seat, card.guid) then return end
+  local ok, hand = pcall(function() return Player[seat].getHandTransform(1) end)
+  if not ok or hand == nil then return end
+  card.setRotation({0, hand.rotation.y + 180, 180})
+  card.setPositionSmooth(hand.position, false, true)
+end
+
+-- Moves the seat's played card face up to its discard pile, unless it's
+-- gone or back in a hand (a card's rules may have done that).
+function GameTable.discard(seat, played)
+  local card = played and played.guid and getObjectFromGUID(played.guid)
+  if card == nil or isInHand(seat, card.guid) then return false end
+  card.setPosition(spot(seat, "discard"))
+  card.setRotation({0, GAME_TABLE_SPOTS[seat].rotY, 0})
+  return true
+end
+
+-- Presses the seat's STACK button on its command tray.
+function GameTable.stackOrders(seat)
+  local tray = getObjectFromGUID(COMMAND_TRAYS[seat])
+  if tray then pcall(function() tray.call("stackTokens") end) end
+end
+
+-- The seat's order tokens: in its command stack and anywhere on the table.
+-- One per undefeated unit, as long as the players removed the defeated ones.
+function GameTable.countOrders(seat)
+  local count = 0
+  local stack = getObjectFromGUID(COMMAND_STACKS[seat])
+  if stack then
+    local ok, contents = pcall(function() return stack.getObjects() end)
+    if ok and type(contents) == "table" then count = #contents end
+  end
+  local prefix = seat .. " "
+  for _, obj in ipairs(getAllObjects()) do
+    local name = obj.getName()
+    if obj ~= stack and name:sub(1, #prefix) == prefix and name:find("Command Token", 1, true) then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+-- Takes `count` Advantage tokens from their bag to the seat's pass pool
+-- spot, three to a row. Returns the tokens' guids.
+function GameTable.dealPassPool(seat, count)
+  local guids = {}
+  local bag = getObjectFromGUID(ADVANTAGE_BAG)
+  if bag == nil then return guids end
+  local away = GAME_TABLE_SPOTS[seat].away
+  for i = 1, count do
+    local col, row = (i - 1) % 3, math.floor((i - 1) / 3)
+    local ok, token = pcall(function()
+      return bag.takeObject({position = spot(seat, "passPool", (col - 1) * 1.6, away * row * 1.6), smooth = true})
+    end)
+    if ok and token then table.insert(guids, token.guid) end
+  end
+  return guids
+end
+
+-- Removes the pass pool tokens that are still on the table.
+function GameTable.returnPassPool(guids)
+  for _, guid in ipairs(guids or {}) do
+    local token = getObjectFromGUID(guid)
+    if token then destroyObject(token) end
+  end
+end

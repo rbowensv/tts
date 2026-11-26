@@ -4,8 +4,13 @@
 -- goes to the main menu (Resume Game comes back), and the game is saved with
 -- the controller, so a reloaded save carries on at the same step.
 --
+-- In the Command Phase it reads the command cards flipped face down in the
+-- hands and reveals them, works out who chooses priority from their pips,
+-- stacks the order tokens and deals the pass pool.
+--
 -- Included by the game controller: it uses the controller's menu and screen
--- functions (createMenu, printToScreen, change*Button, clearAllButtons).
+-- functions (createMenu, printToScreen, change*Button, clearAllButtons), and
+-- !/GameTable for what it does on the table.
 --
 -- Whatever the walk-through does on the table must fail quietly: a piece
 -- that isn't where it's expected was most likely moved by the players on
@@ -16,12 +21,27 @@ game = nil
 local GAME_TINT = {0, 0.913, 1}
 local GAME_SEAT_TINTS = {Blue = {0, 0.4, 1}, Red = {1, 0.2, 0.2}}
 local GAME_CHAT_COLOR = {0.8, 0.9, 1}
+local GAME_WARN_COLOR = {1, 0.8, 0.4}
 -- A click this soon after the buttons are redrawn was aimed at the old ones.
 local GAME_REDRAW_GUARD = 0.5
 
 local function gameClickAllowed(playerColor)
   if playerColor == nil or playerColor == "Grey" then return false end
   return os.clock() - (gameDrawnAt or 0) >= GAME_REDRAW_GUARD
+end
+
+local function warn(playerColor, text)
+  pcall(broadcastToColor, text, playerColor, GAME_WARN_COLOR)
+end
+
+-- A seated player can only click for their own seat; an empty seat's
+-- buttons are anyone's.
+local function mayClickFor(seat, playerColor)
+  if Player[seat].seated and playerColor ~= seat then
+    warn(playerColor, "Only the " .. seat .. " seat can click that.")
+    return false
+  end
+  return true
 end
 
 local function roleName(role)
@@ -33,6 +53,34 @@ local function seatName(seat)
   local role = game:roleOf(seat)
   if role == seat then return roleName(role) end
   return seat .. " seat (" .. role:lower() .. " player)"
+end
+
+local function plural(count, word)
+  return count .. " " .. word .. (count == 1 and "" or "s")
+end
+
+-- "No Escape (1 pip)" for a role's played card; nil when none was played.
+local function playedText(role)
+  local card = game.played[game:seatOf(role)]
+  if card == nil then return nil end
+  local name = card.name or "a command card"
+  return card.pip and (name .. " (" .. plural(card.pip, "pip") .. ")") or name
+end
+
+local function cardsText()
+  local lines = {}
+  for _, role in ipairs({"Blue", "Red"}) do
+    table.insert(lines, roleName(role) .. ": " .. (playedText(role) or "no card"))
+  end
+  return table.concat(lines, "\n")
+end
+
+-- The undefeated unit counts by role, and who gets how many Advantage tokens.
+local function passPoolPlan()
+  local blue = game.units[game:seatOf("Blue")] or 0
+  local red = game.units[game:seatOf("Red")] or 0
+  local role, count = Game.passPoolFor(blue, red)
+  return blue, red, role, count
 end
 
 local function phaseHeader()
@@ -54,6 +102,38 @@ local function readyStatus()
   return table.concat(lines, "\n")
 end
 
+local function priorityText()
+  local state = game:priorityState()
+  if state.mode == "given" then
+    return cardsText() .. "\n\nOnly the " .. roleName(state.role):lower()
+      .. " played a card,\nso they have priority."
+  elseif state.mode == "choose" then
+    local why
+    if game.rolled then
+      why = "The blue player rolled " .. (game.rolled == "block" and "a block" or "no block")
+    else
+      why = "The " .. roleName(state.chooser):lower() .. " played fewer pips"
+    end
+    return cardsText() .. "\n\n" .. why .. ":\nthe " .. roleName(state.chooser):lower()
+      .. " chooses who has priority."
+  elseif state.mode == "roll" then
+    local why = next(game.played) and "Same pips" or "No command cards"
+    return cardsText() .. "\n\n" .. why .. ": the blue player rolls a red defense die.\n"
+      .. "On a block they choose who has priority,\notherwise the red player chooses."
+  end
+  return cardsText() .. "\n\nThe card with fewer pips chooses who has priority.\n"
+    .. "Same pips: the blue player rolls a red defense die."
+end
+
+local function passPoolText()
+  local blue, red, role, count = passPoolPlan()
+  local result = role and ("The " .. roleName(role):lower() .. " takes " .. plural(count, "Advantage token") .. ".")
+    or "Even: no pass pool this round."
+  return "Undefeated units (order tokens on the table):\n"
+    .. "blue player " .. blue .. ", red player " .. red .. "\n\n"
+    .. result .. "\nIs that right? Adjust the counts if not."
+end
+
 local function finalScore()
   local blue, red = Scoreboard.vp("Blue"), Scoreboard.vp("Red")
   if blue == nil or red == nil then
@@ -70,7 +150,15 @@ local function showScreen()
     body = finalScore()
   else
     local step = game:currentStep()
-    body = step.title:upper() .. "\n\n" .. game:text(step)
+    local text = game:text(step)
+    if step.id == "resolveCards" then
+      text = cardsText() .. "\n\nResolve their effects, the blue player's first."
+    elseif step.choice == "priority" then
+      text = priorityText()
+    elseif step.id == "passPool" and game.units then
+      text = passPoolText()
+    end
+    body = step.title:upper() .. "\n\n" .. text
     if step.wait == "ready" then
       body = body .. "\n\n" .. readyStatus()
     end
@@ -88,6 +176,34 @@ local function applyChange(changed, oldPhase)
   elseif game.phase ~= oldPhase then
     local where = game.phase == "setup" and "" or ("Round " .. game.round .. ": ")
     printToAll(where .. GAME_PHASE_TITLES[game.phase]:lower():gsub("^%l", string.upper) .. ".", GAME_CHAT_COLOR)
+  end
+end
+
+local function priorityEntries(entries)
+  local state = game:priorityState()
+  if state.mode == "roll" then
+    local tint = GAME_SEAT_TINTS[game:seatOf("Blue")]
+    table.insert(entries, {functionName = "gameRollBlock", label = "Rolled a Block", tooltip = "The blue player rolled a block: they choose who has priority", buttonTint = tint})
+    table.insert(entries, {functionName = "gameRollOther", label = "Rolled No Block", tooltip = "The blue player rolled a blank or a surge: the red player chooses", buttonTint = tint})
+    return
+  end
+  for _, role in ipairs({"Blue", "Red"}) do
+    if state.mode ~= "given" or state.role == role then
+      table.insert(entries, {functionName = "gamePriority" .. role, label = roleName(role) .. " Has Priority", tooltip = "The " .. roleName(role) .. " (" .. game:seatOf(role) .. " seat) has priority this round", buttonTint = GAME_SEAT_TINTS[game:seatOf(role)]})
+    end
+  end
+end
+
+local function passPoolEntries(entries)
+  if game.units == nil then
+    game.units = {Blue = GameTable.countOrders("Blue"), Red = GameTable.countOrders("Red")}
+  end
+  local _, _, role, count = passPoolPlan()
+  table.insert(entries, {functionName = "gamePassPoolConfirm", label = role and ("Right: Deal " .. count .. " Advantage") or "Right: No Pass Pool", tooltip = "The counts are right: deal the pass pool and start the Activation Phase", buttonTint = GAME_TINT})
+  for _, role in ipairs({"Blue", "Red"}) do
+    local seat = game:seatOf(role)
+    table.insert(entries, {functionName = "gameUnitsUp" .. seat, label = roleName(role) .. ": +1 Unit", tooltip = "The " .. roleName(role) .. " has one more undefeated unit", buttonTint = GAME_SEAT_TINTS[seat]})
+    table.insert(entries, {functionName = "gameUnitsDown" .. seat, label = roleName(role) .. ": -1 Unit", tooltip = "The " .. roleName(role) .. " has one fewer undefeated unit", buttonTint = GAME_SEAT_TINTS[seat]})
   end
 end
 
@@ -115,9 +231,12 @@ function showGame()
         end
       end
     elseif step.choice == "priority" then
-      for _, role in ipairs({"Blue", "Red"}) do
-        table.insert(entries, {functionName = "gamePriority" .. role, label = roleName(role) .. " Has Priority", tooltip = "The " .. roleName(role) .. " (" .. game:seatOf(role) .. " seat) has priority this round", buttonTint = GAME_SEAT_TINTS[game:seatOf(role)]})
-      end
+      priorityEntries(entries)
+    elseif step.id == "orderPool" then
+      table.insert(entries, {functionName = "gameStackOrders", label = "Stack Order Tokens", tooltip = "Press STACK on both command trays, then go on", buttonTint = GAME_TINT})
+      table.insert(entries, {functionName = "gameNext", label = "Already Stacked", tooltip = "Go on to the pass pool", buttonTint = GAME_TINT})
+    elseif step.id == "passPool" then
+      passPoolEntries(entries)
     else
       table.insert(entries, {functionName = "gameNext", label = step.next or "Next Step", tooltip = "Go on to the next step", buttonTint = GAME_TINT})
     end
@@ -145,22 +264,53 @@ end
 
 function gameBack()
   if game == nil or os.clock() - (gameDrawnAt or 0) < GAME_REDRAW_GUARD then return end
+  local played, passPool = game.played, game.passPool
   local changed = game:back()
   if changed.round then
     Scoreboard.setRound(changed.round)
   end
+  -- Undo what the undone step did on the table.
+  for seat, card in pairs(played or {}) do
+    if game.played[seat] == nil then GameTable.returnToHand(seat, card) end
+  end
+  if passPool and game.passPool == nil then
+    GameTable.returnPassPool(passPool.guids)
+  end
   showGame()
+end
+
+-- Both seats are ready: their cards go face up to their played spots.
+local function revealCards()
+  local lines = {}
+  for _, role in ipairs({"Blue", "Red"}) do
+    local seat = game:seatOf(role)
+    local card = game.played[seat]
+    if card and card.guid and not GameTable.reveal(seat, card) then
+      printToAll("The " .. roleName(role):lower() .. "'s command card has left their hand: reveal it by hand.", GAME_CHAT_COLOR)
+    end
+    table.insert(lines, "The " .. roleName(role):lower() .. " plays " .. (playedText(role) or "no card"))
+  end
+  broadcastToAll(table.concat(lines, ". ") .. ".", GAME_CHAT_COLOR)
 end
 
 local function seatReady(seat, noCard, playerColor)
   if game == nil or not gameClickAllowed(playerColor) then return end
-  if Player[seat].seated and playerColor ~= seat then
-    pcall(broadcastToColor, "Only the " .. seat .. " seat can click that.", playerColor, {1, 0.8, 0.4})
-    return
+  if not mayClickFor(seat, playerColor) then return end
+  local card = nil
+  if not noCard then
+    local cards = GameTable.faceDownCards(seat)
+    if #cards == 0 then
+      warn(playerColor, "Flip the command card you'll play face down in your hand first.")
+      return
+    elseif #cards > 1 then
+      warn(playerColor, #cards .. " cards are face down in your hand: flip all but one face up.")
+      return
+    end
+    card = GameTable.describe(cards[1])
   end
   local oldPhase = game.phase
-  if game:setReady(seat, noCard) then
-    broadcastToAll("Both players are ready: reveal your command cards.", GAME_CHAT_COLOR)
+  if game:setReady(seat, noCard, card) then
+    revealCards()
     applyChange({}, oldPhase)
   end
   showGame()
@@ -175,13 +325,78 @@ local function choosePriority(role, playerColor)
   if game == nil or not gameClickAllowed(playerColor) then return end
   local step = game:currentStep()
   if step == nil or step.choice ~= "priority" then return end
+  local state = game:priorityState()
+  if state.mode == "choose" and not mayClickFor(game:seatOf(state.chooser), playerColor) then return end
   game:setPriority(role)
-  printToAll("Round " .. game.round .. ": the " .. roleName(role) .. " has priority.", GAME_CHAT_COLOR)
+  printToAll("Round " .. game.round .. ": the " .. roleName(role):lower() .. " has priority.", GAME_CHAT_COLOR)
   showGame()
 end
 
 function gamePriorityBlue(_, playerColor) choosePriority("Blue", playerColor) end
 function gamePriorityRed(_, playerColor) choosePriority("Red", playerColor) end
+
+local function rolled(result, playerColor)
+  if game == nil or not gameClickAllowed(playerColor) then return end
+  local step = game:currentStep()
+  if step == nil or step.choice ~= "priority" or game:priorityState().mode ~= "roll" then return end
+  if not mayClickFor(game:seatOf("Blue"), playerColor) then return end
+  game:setRoll(result)
+  local chooser = game:priorityState().chooser
+  printToAll("The blue player rolled " .. (result == "block" and "a block" or "no block")
+    .. ": the " .. roleName(chooser):lower() .. " chooses who has priority.", GAME_CHAT_COLOR)
+  showGame()
+end
+
+function gameRollBlock(_, playerColor) rolled("block", playerColor) end
+function gameRollOther(_, playerColor) rolled("other", playerColor) end
+
+function gameStackOrders(_, playerColor)
+  if game == nil or not gameClickAllowed(playerColor) then return end
+  local step = game:currentStep()
+  if step == nil or step.id ~= "orderPool" then return end
+  GameTable.stackOrders("Blue")
+  GameTable.stackOrders("Red")
+  -- Count the tokens once they're in the stacks; ignore clicks till then.
+  gameDrawnAt = os.clock() + 1
+  Wait.time(function()
+    if game and game:currentStep() and game:currentStep().id == "orderPool" then
+      game:next()
+      showGame()
+    end
+  end, 1)
+end
+
+local function adjustUnits(seat, by, playerColor)
+  if game == nil or game.units == nil or not gameClickAllowed(playerColor) then return end
+  local step = game:currentStep()
+  if step == nil or step.id ~= "passPool" then return end
+  game.units[seat] = math.max(0, (game.units[seat] or 0) + by)
+  showGame()
+end
+
+function gameUnitsUpBlue(_, playerColor) adjustUnits("Blue", 1, playerColor) end
+function gameUnitsDownBlue(_, playerColor) adjustUnits("Blue", -1, playerColor) end
+function gameUnitsUpRed(_, playerColor) adjustUnits("Red", 1, playerColor) end
+function gameUnitsDownRed(_, playerColor) adjustUnits("Red", -1, playerColor) end
+
+function gamePassPoolConfirm(_, playerColor)
+  if game == nil or game.units == nil or not gameClickAllowed(playerColor) then return end
+  local step = game:currentStep()
+  if step == nil or step.id ~= "passPool" then return end
+  local _, _, role, count = passPoolPlan()
+  local passPool = nil
+  if role then
+    local seat = game:seatOf(role)
+    passPool = {seat = seat, guids = GameTable.dealPassPool(seat, count)}
+    printToAll("Pass pool: the " .. roleName(role):lower() .. " takes " .. plural(count, "Advantage token") .. ".", GAME_CHAT_COLOR)
+  end
+  local oldPhase = game.phase
+  local changed = game:next()
+  -- Set after the step, so going back to it takes the tokens away again.
+  game.passPool = passPool
+  applyChange(changed, oldPhase)
+  showGame()
+end
 
 function gameClose(_, playerColor)
   if not gameClickAllowed(playerColor) then return end

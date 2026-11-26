@@ -3,6 +3,7 @@ require('!/Deck')
 require('!/Mission')
 require('!/Scoreboard')
 require('!/Game')
+require('!/GameTable')
 require('!/GameFlow')
 require('!/common/Zonex')
 

@@ -120,6 +120,10 @@ function Game:create(params)
     priority = nil,
     ready    = {},
     noCard   = {},
+    played   = {},
+    rolled   = nil,
+    units    = nil,
+    passPool = nil,
     history  = {},
   }, Game)
 end
@@ -134,6 +138,10 @@ function Game:load(data)
   game.priority = data.priority
   game.ready    = type(data.ready) == "table" and data.ready or {}
   game.noCard   = type(data.noCard) == "table" and data.noCard or {}
+  game.played   = type(data.played) == "table" and data.played or {}
+  game.rolled   = data.rolled
+  game.units    = type(data.units) == "table" and data.units or nil
+  game.passPool = type(data.passPool) == "table" and data.passPool or nil
   game.history  = type(data.history) == "table" and data.history or {}
   -- A save from a version with other steps: start the phase over.
   if game.phase ~= "over" and (GAME_STEPS[game.phase] == nil or GAME_STEPS[game.phase][game.step] == nil) then
@@ -153,6 +161,10 @@ function Game:save()
     priority = self.priority,
     ready    = self.ready,
     noCard   = self.noCard,
+    played   = self.played,
+    rolled   = self.rolled,
+    units    = self.units,
+    passPool = self.passPool,
     history  = self.history,
   }
 end
@@ -187,9 +199,17 @@ function Game:text(step)
   return (step.text:gsub("{priority}", priority):gsub("{round}", tostring(self.round)))
 end
 
+local function copy(t)
+  if type(t) ~= "table" then return t end
+  local c = {}
+  for k, v in pairs(t) do c[k] = copy(v) end
+  return c
+end
+
 local function snapshot(self)
   return {round = self.round, phase = self.phase, step = self.step, priority = self.priority,
-          ready = self.ready, noCard = self.noCard}
+          ready = copy(self.ready), noCard = copy(self.noCard), played = copy(self.played),
+          rolled = self.rolled, units = copy(self.units), passPool = copy(self.passPool)}
 end
 
 -- Moves to the next step. Returns what changed beyond the step:
@@ -227,7 +247,8 @@ end
 function Game:_startPhase(phase)
   self.phase, self.step = phase, 1
   if phase == "command" then
-    self.ready, self.noCard = {}, {}
+    self.ready, self.noCard, self.played = {}, {}, {}
+    self.rolled, self.units, self.passPool = nil, nil, nil
   end
   return {}
 end
@@ -244,10 +265,11 @@ function Game:back()
   local oldRound = self.round
   self.round, self.phase, self.step = last.round, last.phase, last.step
   self.priority, self.ready, self.noCard = last.priority, last.ready or {}, last.noCard or {}
+  self.played, self.rolled, self.units, self.passPool = last.played or {}, last.rolled, last.units, last.passPool
   -- Back to choosing cards: both choose again.
   local step = self:currentStep()
   if step and step.wait == "ready" then
-    self.ready, self.noCard = {}, {}
+    self.ready, self.noCard, self.played = {}, {}, {}
   end
   if self.round ~= oldRound then
     return {round = self.round}
@@ -255,18 +277,51 @@ function Game:back()
   return {}
 end
 
--- A seat is ready to reveal (noCard: it can't play a command card). Returns
+-- A seat is ready to reveal (noCard: it can't play a command card). `card`
+-- is the card it plays, {guid, name, pip}, pip nil when unknown. Returns
 -- true when both seats are, and the step moves on.
-function Game:setReady(seat, noCard)
+function Game:setReady(seat, noCard, card)
   local step = self:currentStep()
   if step == nil or step.wait ~= "ready" then return false end
   self.ready[seat] = true
   self.noCard[seat] = noCard and true or nil
+  -- A card not found still counts as played, its pips unknown.
+  self.played[seat] = (not noCard) and (card or {}) or nil
   if self.ready.Red and self.ready.Blue then
     self:next()
     return true
   end
   return false
+end
+
+-- How priority is decided this round, from the played cards' pips:
+--   {mode = "given",  role = r}    only r played a card: r has priority
+--   {mode = "choose", chooser = r} r played fewer pips (or won the roll)
+--   {mode = "roll",   roller = r}  same pips, or no cards: r rolls a red
+--                                  defense die (always the blue player)
+--   {mode = "open"}                a card's pips aren't known: players say
+function Game:priorityState()
+  local blue, red = self.played[self:seatOf("Blue")], self.played[self:seatOf("Red")]
+  if blue and not red then return {mode = "given", role = "Blue"} end
+  if red and not blue then return {mode = "given", role = "Red"} end
+  if blue and red then
+    if blue.pip == nil or red.pip == nil then return {mode = "open"} end
+    if blue.pip < red.pip then return {mode = "choose", chooser = "Blue"} end
+    if red.pip < blue.pip then return {mode = "choose", chooser = "Red"} end
+  end
+  if self.rolled ~= nil then
+    return {mode = "choose", chooser = self.rolled == "block" and "Blue" or "Red"}
+  end
+  return {mode = "roll", roller = "Blue"}
+end
+
+-- The roller's red defense die: "block" (they choose) or "other" (the other
+-- player chooses).
+function Game:setRoll(result)
+  local step = self:currentStep()
+  if step == nil or step.choice ~= "priority" then return end
+  table.insert(self.history, snapshot(self))
+  self.rolled = result
 end
 
 -- Records who has priority this round (a role) and moves on.
@@ -275,6 +330,15 @@ function Game:setPriority(role)
   if step == nil or step.choice ~= "priority" then return end
   self.priority = role
   self:next()
+end
+
+-- The pass pool from each side's count of undefeated units: the side with
+-- fewer takes the difference in Advantage tokens. Returns that role and the
+-- count, or nil and 0 when they're even.
+function Game.passPoolFor(blueUnits, redUnits)
+  if blueUnits == redUnits then return nil, 0 end
+  if blueUnits < redUnits then return "Blue", redUnits - blueUnits end
+  return "Red", blueUnits - redUnits
 end
 
 -- The winner from the final scores: "Blue", "Red", or nil for a tie.

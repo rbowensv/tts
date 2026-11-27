@@ -232,9 +232,10 @@ function showGame()
       end
     elseif step.choice == "priority" then
       priorityEntries(entries)
-    elseif step.id == "orderPool" then
-      table.insert(entries, {functionName = "gameStackOrders", label = "Stack Order Tokens", tooltip = "Press STACK on both command trays, then go on", buttonTint = GAME_TINT})
-      table.insert(entries, {functionName = "gameNext", label = "Already Stacked", tooltip = "Go on to the pass pool", buttonTint = GAME_TINT})
+    elseif step.action and GAME_ACTIONS[step.action] then
+      local action = GAME_ACTIONS[step.action]
+      table.insert(entries, {functionName = "gameAction", label = action.label, tooltip = action.tooltip, buttonTint = GAME_TINT})
+      table.insert(entries, {functionName = "gameNext", label = "Done by Hand", tooltip = "Already done: go on without touching the table", buttonTint = GAME_TINT})
     elseif step.id == "passPool" then
       passPoolEntries(entries)
     else
@@ -249,8 +250,9 @@ function showGame()
   showScreen()
 end
 
-function startGame(blueSeat)
-  game = Game:create({blueSeat = blueSeat})
+-- objective, secondary: the mission's card names, for the scoring steps.
+function startGame(blueSeat, objective, secondary)
+  game = Game:create({blueSeat = blueSeat, objective = objective, secondary = secondary})
   printToAll("Setup.", GAME_CHAT_COLOR)
   showGame()
 end
@@ -275,6 +277,12 @@ function gameBack()
   end
   if passPool and game.passPool == nil then
     GameTable.returnPassPool(passPool.guids)
+  end
+  -- Back before the discard: the cards go back to their played spots (if
+  -- they can still be found: a card dropped on the discard pile joins it).
+  local step = game:currentStep()
+  if step and step.id == "discardCards" then
+    for seat, card in pairs(game.played) do GameTable.undiscard(seat, card) end
   end
   showGame()
 end
@@ -350,20 +358,60 @@ end
 function gameRollBlock(_, playerColor) rolled("block", playerColor) end
 function gameRollOther(_, playerColor) rolled("other", playerColor) end
 
-function gameStackOrders(_, playerColor)
+-- What a step's action does on the table (see the steps' `action` in
+-- !/Game). `wait` is how long to give it before going on.
+GAME_ACTIONS = {
+  stackOrders = {
+    label = "Stack Order Tokens", tooltip = "Press STACK on both command trays, then go on",
+    wait = 1, -- the pass pool counts the stacks
+    run = function()
+      GameTable.stackOrders("Blue")
+      GameTable.stackOrders("Red")
+    end,
+  },
+  discardCards = {
+    label = "Discard Command Cards", tooltip = "Move the revealed command cards to their discard piles",
+    run = function()
+      for seat, card in pairs(game.played) do GameTable.discard(seat, card) end
+      printToAll("Command cards discarded.", GAME_CHAT_COLOR)
+    end,
+  },
+  removeTokens = {
+    label = "Remove Tokens", tooltip = "Remove Aim, Dodge, Observation, Surge, Standby and Smoke tokens, 1 Suppression from each unit, and the pass pool",
+    run = function()
+      GameTable.removeEndPhaseTokens()
+      if game.passPool then GameTable.returnPassPool(game.passPool.guids) end
+      printToAll("Aim, Dodge, Observation, Surge, Standby and Smoke tokens, 1 Suppression from each unit and the pass pool removed.", GAME_CHAT_COLOR)
+    end,
+  },
+  returnOrders = {
+    label = "Return Order Tokens", tooltip = "Send every order token back to its command tray",
+    run = function()
+      GameTable.returnOrders()
+      printToAll("Order tokens returned to the command trays.", GAME_CHAT_COLOR)
+    end,
+  },
+}
+
+function gameAction(_, playerColor)
   if game == nil or not gameClickAllowed(playerColor) then return end
   local step = game:currentStep()
-  if step == nil or step.id ~= "orderPool" then return end
-  GameTable.stackOrders("Blue")
-  GameTable.stackOrders("Red")
-  -- Count the tokens once they're in the stacks; ignore clicks till then.
-  gameDrawnAt = os.clock() + 1
+  local action = step and step.action and GAME_ACTIONS[step.action]
+  if action == nil then return end
+  local ok, err = pcall(action.run)
+  if not ok then
+    printToAll("Couldn't do all of that (" .. tostring(err) .. "): please finish it by hand.", GAME_WARN_COLOR)
+  end
+  -- Ignore clicks till the step moves on.
+  local wait = action.wait or 0.5
+  gameDrawnAt = os.clock() + wait
   Wait.time(function()
-    if game and game:currentStep() and game:currentStep().id == "orderPool" then
-      game:next()
+    if game and game:currentStep() == step then
+      local oldPhase = game.phase
+      applyChange(game:next(), oldPhase)
       showGame()
     end
-  end, 1)
+  end, wait)
 end
 
 local function adjustUnits(seat, by, playerColor)

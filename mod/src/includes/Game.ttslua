@@ -12,8 +12,10 @@
 --   wait   = "ready": both seats click Ready (or No Card) to go on.
 --   choice = "priority": a player picks who has priority to go on.
 --   next   = the label of the button that goes on (default "Next Step").
--- In a step's text, {priority} is the player with priority this round, and
--- {round} the round.
+--   action = what the controller does on the table before going on (see
+--            !/GameFlow); the players can also skip it, done by hand.
+-- In a step's text, {priority} is the player with priority this round,
+-- {round} the round, and {objective} and {secondary} the mission's cards.
 
 Game = {}
 Game.__index = Game
@@ -63,7 +65,7 @@ GAME_STEPS = {
      text = "Starting with the {priority}, issue the orders\n"
        .. "on your command card: one per unit, of any type\n"
        .. "the card names. Orders you can't give are lost."},
-    {id = "orderPool", title = "Create the Order Pool",
+    {id = "orderPool", title = "Create the Order Pool", action = "stackOrders",
      text = "Put an order token for each undefeated unit without\n"
        .. "an order in your command stack, and shuffle it."},
     {id = "passPool", title = "Create the Pass Pool",
@@ -81,19 +83,19 @@ GAME_STEPS = {
      text = "Resolve abilities and effects that happen\n"
        .. "at the start of the End Phase."},
     {id = "scoreObjective", title = "Score the Objective",
-     text = "Score VPs as described on the Objective card,\n"
-       .. "on the scoreboard's VP track."},
+     text = "Score VPs as described on the Objective card\n"
+       .. "{objective}on the scoreboard's VP track."},
     {id = "scoreSecondary", title = "Score the Secondary Objective",
      text = "Score VPs as described on the Secondary Objective\n"
-       .. "card, on the scoreboard's VP track."},
-    {id = "discardCards", title = "Discard Command Cards",
+       .. "card {secondary}on the scoreboard's VP track."},
+    {id = "discardCards", title = "Discard Command Cards", action = "discardCards",
      text = "Discard your revealed command card.\n"
        .. "It can't be played again this game."},
-    {id = "removeTokens", title = "Remove Tokens",
-     text = "Remove all Aim, Dodge, Observation, Surge and Standby\n"
+    {id = "removeTokens", title = "Remove Tokens", action = "removeTokens",
+     text = "Remove all Aim, Dodge, Observation, Surge, Standby\nand Smoke "
        .. "tokens, then 1 Suppression token from each unit,\n"
        .. "then the Advantage tokens in your pass pool."},
-    {id = "updateOrderPool", title = "Update the Order Pool",
+    {id = "updateOrderPool", title = "Update the Order Pool", action = "returnOrders",
      text = "Return your order tokens to your command tray."},
     {id = "endEffects", title = "End of the End Phase",
      text = "Resolve abilities and effects that happen\n"
@@ -111,9 +113,12 @@ local function otherSeat(seat)
 end
 
 -- params.blueSeat = "Red" or "Blue" (who is the blue player)
+-- params.objective, params.secondary = the mission's card names, if known
 function Game:create(params)
   return setmetatable({
-    blueSeat = params.blueSeat or "Blue",
+    blueSeat  = params.blueSeat or "Blue",
+    objective = params.objective,
+    secondary = params.secondary,
     round    = 1,
     phase    = "setup",
     step     = 1,
@@ -131,7 +136,7 @@ end
 -- A game from save(); nil if `data` isn't one.
 function Game:load(data)
   if type(data) ~= "table" or data.phase == nil then return nil end
-  local game = Game:create({blueSeat = data.blueSeat})
+  local game = Game:create({blueSeat = data.blueSeat, objective = data.objective, secondary = data.secondary})
   game.round    = tonumber(data.round) or 1
   game.phase    = data.phase
   game.step     = tonumber(data.step) or 1
@@ -154,7 +159,9 @@ end
 -- Everything needed to carry on, as a plain table (for JSON).
 function Game:save()
   return {
-    blueSeat = self.blueSeat,
+    blueSeat  = self.blueSeat,
+    objective = self.objective,
+    secondary = self.secondary,
     round    = self.round,
     phase    = self.phase,
     step     = self.step,
@@ -191,12 +198,22 @@ function Game:currentStep()
   return steps and steps[self.step]
 end
 
--- The step's text, with {priority} and {round} filled in.
+-- "(Payload), " style, for a card name in a step's text.
+local function cardName(name)
+  if type(name) ~= "string" or name == "" then return "" end
+  return "(" .. name .. "), "
+end
+
+-- The step's text, with {priority}, {round}, {objective} and {secondary}
+-- filled in.
 function Game:text(step)
   step = step or self:currentStep()
   if step == nil then return "" end
   local priority = self.priority and (self.priority:lower() .. " player") or "player with priority"
-  return (step.text:gsub("{priority}", priority):gsub("{round}", tostring(self.round)))
+  local text = step.text:gsub("{priority}", priority):gsub("{round}", tostring(self.round))
+  text = text:gsub("{objective}", function() return cardName(self.objective) end)
+  text = text:gsub("{secondary}", function() return cardName(self.secondary) end)
+  return text
 end
 
 local function copy(t)

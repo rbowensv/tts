@@ -2382,5 +2382,5 @@ function setUpMission(flipBattlefield)
   missionMenuOpen = false
   missionActingSeat = nil
   -- On to the game: Setup, then the five rounds.
-  startGame(result.blueSeat)
+  startGame(result.blueSeat, result.objective, result.secondary)
 end

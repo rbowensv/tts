@@ -269,6 +269,32 @@ test("units and pass pool are saved and undone", function()
   eq(game.passPool.seat, "Blue", "back keeps the pool of that step")
 end)
 
+test("the scoring steps name the mission's cards, if known", function()
+  local game = Game:create({objective = "Payload", secondary = "Ordnance"})
+  advanceTo(game, "end", "scoreObjective")
+  assert(game:text():find("(Payload), on", 1, true), game:text())
+  game:next()
+  assert(game:text():find("(Ordnance), on", 1, true), game:text())
+  local copy = Game:load(game:save())
+  eq(copy.objective, "Payload", "saved")
+  local unnamed = Game:create({})
+  advanceTo(unnamed, "end", "scoreObjective")
+  assert(unnamed:text():find("card\non the", 1, true), unnamed:text())
+end)
+
+test("the table steps have actions", function()
+  local actions = {}
+  for _, phase in ipairs(GAME_PHASES) do
+    for _, step in ipairs(GAME_STEPS[phase]) do
+      if step.action then actions[step.id] = step.action end
+    end
+  end
+  eq(actions.orderPool, "stackOrders")
+  eq(actions.discardCards, "discardCards")
+  eq(actions.removeTokens, "removeTokens")
+  eq(actions.updateOrderPool, "returnOrders")
+end)
+
 if failures > 0 then
   print(failures .. " test(s) failed")
   os.exit(1)

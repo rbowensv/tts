@@ -113,6 +113,15 @@ function GameTable.discard(seat, played)
   return true
 end
 
+-- Undoes discard: the card goes back to its played spot, unless it's gone
+-- (joined the discard pile) or back in a hand.
+function GameTable.undiscard(seat, played)
+  local card = played and played.guid and getObjectFromGUID(played.guid)
+  if card == nil or isInHand(seat, card.guid) then return end
+  card.setPosition(spot(seat, "played"))
+  card.setRotation({0, GAME_TABLE_SPOTS[seat].rotY, 0})
+end
+
 -- Presses the seat's STACK button on its command tray.
 function GameTable.stackOrders(seat)
   local tray = getObjectFromGUID(COMMAND_TRAYS[seat])
@@ -153,6 +162,75 @@ function GameTable.dealPassPool(seat, count)
     if ok and token then table.insert(guids, token.guid) end
   end
   return guids
+end
+
+-- The tokens removed in the End Phase, the same ones RETURN TOKENS clears.
+local END_PHASE_TOKENS = {
+  ["Aim Token"] = true,
+  ["Dodge Token"] = true,
+  ["Observation Token"] = true,
+  ["Surge Token"] = true,
+  ["Standby Token"] = true,
+  ["Smoke Token"] = true,
+}
+
+-- Removes every Aim, Dodge, Observation, Surge, Standby and Smoke token on
+-- the battlefield (their bags are infinite), then one Suppression token from
+-- each unit. Returns how many tokens (or stacks) were removed.
+function GameTable.removeEndPhaseTokens()
+  local removed = 0
+  local zone = getObjectFromGUID(Global.getVar("battlefieldZoneGUID") or "")
+  if zone then
+    for _, obj in ipairs(zone.getObjects()) do
+      if END_PHASE_TOKENS[obj.getName()] and not obj.held_by_color then
+        destroyObject(obj)
+        removed = removed + 1
+      end
+    end
+  end
+  pcall(function() Global.call("gRemoveOneSuppression") end)
+  return removed
+end
+
+local function isOrderToken(obj)
+  if obj.type == "Bag" or obj.type == "Infinite" then return false end
+  local ok, isToken = pcall(function() return obj.getVar("isAToken") end)
+  return ok and isToken == true
+end
+
+-- Sends every order token back to its command tray, like RETURN TOKENS
+-- does, including any left in the command stacks. Returns how many moved.
+function GameTable.returnOrders()
+  local trays = Global.getTable("commandTokenTrayData") or {}
+  local inTray = {}
+  for _, side in pairs(trays) do
+    local zone = side.trayZoneGUID and getObjectFromGUID(side.trayZoneGUID)
+    for _, obj in ipairs(zone and zone.getObjects() or {}) do inTray[obj.guid] = true end
+  end
+  local moved = 0
+  for _, obj in ipairs(getAllObjects()) do
+    if not inTray[obj.guid] and not obj.held_by_color and isOrderToken(obj) then
+      local unitData = obj.getTable("unitData") or {}
+      local side = trays[unitData.colorSide or ""]
+      local tray = side and getObjectFromGUID(side[unitData.commandType or ""] or "")
+      if tray then
+        moved = moved + 1
+        local pos = tray.getPosition()
+        pos.y = pos.y + 0.5 + 0.2 * moved
+        obj.setPositionSmooth(pos, false, false)
+        obj.setRotationSmooth(tray.getRotation(), false, false)
+      end
+    end
+  end
+  -- Tokens still in a command stack: its tray's SPLIT puts them back.
+  for seat, guid in pairs(COMMAND_STACKS) do
+    local stack = getObjectFromGUID(guid)
+    local tray = getObjectFromGUID(COMMAND_TRAYS[seat])
+    if stack and tray and #stack.getObjects() > 0 then
+      pcall(function() tray.call("splitTokens") end)
+    end
+  end
+  return moved
 end
 
 -- Removes the pass pool tokens that are still on the table.
